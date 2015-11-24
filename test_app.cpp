@@ -17,6 +17,10 @@ public:
    void inplace_transpose_square_CPU(int start_x);
 
    void inplace_transpose_swap_CPU();
+   int inplace_transpose_swap_GPU(char** argv,
+                                   cl_command_queue  commands,
+                                   cl_kernel kernel,
+                                   cl_double *ptr_NDRangePureExecTimeMs);
 
    int inplace_transpose_square_GPU( char** argv,
                                       cl_command_queue  commands,
@@ -39,15 +43,16 @@ public:
    int start_inx;
 private:
     cl_mem input_output_buffer_device;
-    T* x;
-    T* y;
-    T* z;
+    T* x; //original data
+    T* y; // GPU output
+    T* z; // CPU output
+    T* interm; //CPU intermediate data
     int L;
     int M;
     int small_dim;
     int big_dim;
     int width;
-    
+    size_t local_work_size_swap;
 };
 
 template<typename T, typename C>
@@ -142,6 +147,120 @@ int get_num_lines_to_be_loaded(int max_capacity, int L)
 }
 
 template<typename T, typename C>
+int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
+                                                                cl_command_queue  commands,
+                                                                cl_kernel kernel_swap,
+                                                                cl_double *ptr_NDRangePureExecTimeMs)
+{
+    cl_int status;
+    size_t global_work_size[MAX_DIMS] = { 1,1,1 };
+    size_t local_work_size[MAX_DIMS] = { 1,1,1 };
+    size_t num_work_items_in_group = local_work_size_swap;
+    int tot_num_work_items = num_work_items_in_group;
+    cl_event warmup_event;
+    cl_event perf_event[NUM_PERF_ITERATIONS];
+    /*size_t global_work_offset[MAX_DIMS] = {0,0,0};*/
+    cl_ulong start = 0, end = 0;
+    int i;
+    cl_double perf_nums[NUM_PERF_ITERATIONS];
+
+    global_work_size[0] = tot_num_work_items;
+    local_work_size[0] = num_work_items_in_group;
+
+    status = clSetKernelArg(kernel_swap,
+        0,
+        sizeof(cl_mem),
+        &input_output_buffer_device);
+
+    if (status != CL_SUCCESS)
+    {
+        std::cout << "The kernel set argument failure\n";
+        return EXIT_FAILURE;
+    }
+
+    /*This is a warmup run*/
+    status = clEnqueueNDRangeKernel(commands,
+        kernel_swap,
+        SUPPORTED_WORK_DIM,
+        NULL,
+        global_work_size,
+        local_work_size,
+        0,
+        NULL,
+        &warmup_event);
+
+    if (status != CL_SUCCESS)
+    {
+        std::cout << "The kernel launch failure\n";
+        return EXIT_FAILURE;
+    }
+
+    clWaitForEvents(1, &warmup_event);
+
+    status = clReleaseEvent(warmup_event);
+    if (status != CL_SUCCESS)
+    {
+        std::cout << "Error releasing events\n";
+        return EXIT_FAILURE;
+    }
+
+    status = clEnqueueReadBuffer(commands,
+        input_output_buffer_device,
+        CL_TRUE,
+        0,
+        L * M * sizeof(T),
+        y,
+        0,
+        NULL,
+        NULL);
+
+    if (status != CL_SUCCESS)
+    {
+        std::cout << "Error Reading output buffer.\n";
+        return EXIT_FAILURE;
+    }
+    *ptr_NDRangePureExecTimeMs = 0;
+#if 0
+    for (i = 0; i < NUM_PERF_ITERATIONS; i++)
+    {
+        status = clEnqueueNDRangeKernel(commands,
+            kernel,
+            SUPPORTED_WORK_DIM,
+            NULL,
+            global_work_size,
+            local_work_size,
+            0,
+            NULL,
+            &perf_event[i]);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel launch failure\n";
+            return EXIT_FAILURE;
+        }
+        clWaitForEvents(1, &perf_event[i]);
+
+        clGetEventProfilingInfo(perf_event[i], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+        clGetEventProfilingInfo(perf_event[i], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+
+        status = clReleaseEvent(perf_event[i]);
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error releasing events\n";
+            return EXIT_FAILURE;
+        }
+
+        /*the resolution of the events is 1e-09 sec*/
+        perf_nums[i] = (cl_double)(end - start)*(cl_double)(1e-06);
+    }
+
+    /*Take the median of the performance numbers*/
+    std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS));
+    *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS + 1) / 2];
+#endif
+    return EXIT_SUCCESS;
+}
+template<typename T, typename C>
 void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
 {
     size_t avail_mem = AVAIL_MEM_SIZE / sizeof(T);
@@ -157,6 +276,9 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
     int num_lines_loaded = get_num_lines_to_be_loaded(max_capacity, small_dim);
     int num_reduced_row; 
     int num_reduced_col;
+
+    local_work_size_swap = num_lines_loaded << 4;
+    local_work_size_swap = (local_work_size_swap > 256) ? 256 : local_work_size_swap;
 
     if (L == small_dim)
     {
@@ -202,16 +324,6 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
         }
         else
         {
-             for(int iter=0; iter<L*M; iter++)
-             {
-                 C* ptr_tmp = (C*)(&z[iter]);
-             	if(!(iter%M))
-             		std::cout << std::endl;
-             
-             	std::cout.width(4);
-             	std::cout << ptr_tmp[0] << " ";
-             }
-             std::cout << std::endl << std::endl;
 
             for (i = 0; i < small_dim; i += num_lines_loaded)
             {
@@ -222,8 +334,6 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
                     {
                         full_mem[(2 * p) * small_dim + j] = z[i*small_dim + p*small_dim + j];
                         full_mem[(2 * p + 1) * small_dim + j] = z[small_dim * small_dim + i*small_dim + p*small_dim + j];
- //                       te[p*small_dim + j] = z[i*small_dim + p*small_dim + j];
- //                       to[p*small_dim + j] = z[small_dim * small_dim + i*small_dim + p*small_dim + j];
                     }
                 }
 
@@ -234,30 +344,13 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
                     {
                         z[i*small_dim + p*small_dim + j] = full_mem[p * small_dim + j];
                         z[small_dim * small_dim + i*small_dim + p*small_dim + j] = full_mem[(num_lines_loaded + p) * small_dim + j];
-//                        z[i*small_dim + (p)*small_dim + j] = te[(p)*small_dim + j];
-//                        z[i*small_dim + (p + 1)*small_dim + j] = to[(p)*small_dim + j];
-//                        z[small_dim * small_dim + i*small_dim + (p)*small_dim + j] = te[(p + 1)*small_dim + j];
-//                        z[small_dim * small_dim + i*small_dim + (p + 1)*small_dim + j] = to[(p + 1)*small_dim + j];
 
                     }
-                }
-
-                if (i == 0)
-                {
-                    for (int iter = 0; iter < L*M; iter++)
-                    {
-                        C* ptr_tmp = (C*)(&z[iter]);
-                        if (!(iter%M))
-                            std::cout << std::endl;
-
-                        std::cout.width(4);
-                        std::cout << ptr_tmp[0] << " ";
-                    }
-                    std::cout << std::endl << std::endl;
                 }
             }
         }
     }
+    memcpy(interm,z,L*M*sizeof(T));
     int *cycle_map = new int[num_reduced_row * num_reduced_col * 2];
     /* The memory required by cycle_map canniot exceed 2 times row*col by design*/
 
@@ -503,7 +596,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
     x = new T[L*M];
     y = new T[L*M];
     z = new T[L*M];
-
+    interm = new T[L*M];
 
     for (int l = 0; l<L; l++)
         for (int m = 0; m<M; m++)
@@ -568,7 +661,8 @@ void test_inplace_transpose<T, C>::inplace_transpose_square_CPU(int start_x)
 int opencl_build_kernel(char** argv,
     cl_context* ptr_context,
     cl_command_queue* ptr_commands,
-    cl_kernel* ptr_kernel,
+    cl_kernel* ptr_kernel_ST,
+    cl_kernel* ptr_kernel_swap,
     INPUT_OUTPUT_TYPE_T input_output_type)
 {
     cl_uint             numPlatforms;
@@ -718,13 +812,20 @@ int opencl_build_kernel(char** argv,
 
     /*Create the compute kernel in the program we wish to run*/
 
-    *ptr_kernel = clCreateKernel(program, "transpose_nonsquare", &err);
-    if (!(*ptr_kernel) || err != CL_SUCCESS)
+    *ptr_kernel_ST = clCreateKernel(program, "transpose_nonsquare", &err);
+    if (!(*ptr_kernel_ST) || err != CL_SUCCESS)
     {
         std::cout << "Error: Failed to create kernel!\n";
         return EXIT_FAILURE;
     }
     
+    *ptr_kernel_swap = clCreateKernel(program, "swap_nonsquare", &err);
+    if (!(*ptr_kernel_swap) || err != CL_SUCCESS)
+    {
+        std::cout << "Error: Failed to create kernel!\n";
+        return EXIT_FAILURE;
+    }
+
     err = clReleaseProgram(program);
     if (err != CL_SUCCESS)
     {
@@ -737,7 +838,7 @@ int opencl_build_kernel(char** argv,
 };
 
 template<typename T, typename C>
-int master_test_function(char** argv, cl_context context, cl_command_queue commands, cl_kernel kernel)
+int master_test_function(char** argv, cl_context context, cl_command_queue commands, cl_kernel kernel_ST, cl_kernel kernel_swap)
 {
     const int L = atoi(argv[4]);
     const int M = atoi(argv[5]);
@@ -748,13 +849,17 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
     test_inplace_transpose.inplace_transpose_square_CPU(0);
     test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx);
 
-    test_inplace_transpose.inplace_transpose_square_GPU(argv, commands, kernel, &NDRangePureExecTimeMs);
+    test_inplace_transpose.inplace_transpose_square_GPU(argv, commands, kernel_ST, &NDRangePureExecTimeMs);
 
     test_inplace_transpose.verify_initial_trans_CPU();
     test_inplace_transpose.verify_initial_trans_GPU();
 
     test_inplace_transpose.inplace_transpose_swap_CPU();
     test_inplace_transpose.verify_swap_CPU();
+
+    test_inplace_transpose.inplace_transpose_swap_GPU(argv, commands, kernel_swap, &NDRangePureExecTimeMs);
+    //test_inplace_transpose.verify_interm_swap_GPU();
+    test_inplace_transpose.verify_swap_GPU();
 
     return EXIT_SUCCESS;
 }
@@ -764,7 +869,8 @@ int main(int argc, char** argv)
     int status;
 
     cl_context          context;
-    cl_kernel           kernel;
+    cl_kernel           kernel_ST;
+    cl_kernel           kernel_swap;
     cl_command_queue    commands;
 
     enum INPUT_OUTPUT_TYPE_T input_output_type;
@@ -780,7 +886,8 @@ int main(int argc, char** argv)
     status = opencl_build_kernel(argv,
         &context,
         &commands,
-        &kernel,
+        &kernel_ST,
+        &kernel_swap,
         input_output_type);
 
     if (status == EXIT_FAILURE)
@@ -792,23 +899,23 @@ int main(int argc, char** argv)
     {
         if (strcmp(argv[3], "float") == 0)
         {
-            master_test_function<cl_float2,cl_float>(argv, context, commands,kernel);
+            master_test_function<cl_float2,cl_float>(argv, context, commands, kernel_ST, kernel_swap);
         }
         else
         {
-            master_test_function<cl_double2, cl_double>(argv, context, commands, kernel);
+            master_test_function<cl_double2, cl_double>(argv, context, commands, kernel_ST, kernel_swap);
         }
     }
     else
     {
         if (strcmp(argv[3], "float") == 0)
         {
-            master_test_function<cl_float, cl_float>(argv, context, commands, kernel);
+            master_test_function<cl_float, cl_float>(argv, context, commands, kernel_ST, kernel_swap);
 
         }
         else
         {
-            master_test_function<cl_double, cl_double>(argv, context, commands, kernel);
+            master_test_function<cl_double, cl_double>(argv, context, commands, kernel_ST, kernel_swap);
 
         }
     }
