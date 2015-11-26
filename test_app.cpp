@@ -14,9 +14,9 @@ public:
                            int L,
                            int M);
 
-   void inplace_transpose_square_CPU(int start_x);
+   void inplace_transpose_square_CPU(int start_x, T* z);
 
-   void inplace_transpose_swap_CPU();
+   void inplace_transpose_swap_CPU(T* z);
    int inplace_transpose_swap_GPU(char** argv,
                                    cl_command_queue  commands,
                                    cl_kernel kernel,
@@ -34,29 +34,43 @@ public:
 
    int verify_swap(T* input, T* output);
 
-   void snake(T *ts, T *td, int num_lines_loaded, int is, int id, int pos);
+   void snake(T *ts, T *td, int num_lines_loaded, int is, int id, int pos, T* z);
    void verify_swap_CPU();
    void verify_swap_GPU();
 
    ~test_inplace_transpose();
-
+   int is_complex_planar;
    int start_inx;
+   cl_mem input_output_buffer_device;
+   T* x; //original data
+   T* y; // GPU output
+   T* z; // CPU output
+   T* interm; //CPU intermediate data
+
+   cl_mem input_output_buffer_device_R;
+   cl_mem input_output_buffer_device_I;
+   T* x_R;
+   T* x_I;
+   T* y_R;
+   T* y_I;
+   T* z_R;
+   T* z_I;
+   T* interm_R;
+   T* interm_I;
+
 private:
-    cl_mem input_output_buffer_device;
-    T* x; //original data
-    T* y; // GPU output
-    T* z; // CPU output
-    T* interm; //CPU intermediate data
+
     int L;
     int M;
     int small_dim;
     int big_dim;
     int width;
+    
     size_t local_work_size_swap;
 };
 
 template<typename T, typename C>
-void test_inplace_transpose<T,C>::snake(T *ts, T *td, int num_lines_loaded, int is, int id, int pos)
+void test_inplace_transpose<T,C>::snake(T *ts, T *td, int num_lines_loaded, int is, int id, int pos, T* z)
 {
     // pos 0 - start, 1 - inter, 2 - end
 
@@ -167,15 +181,42 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     global_work_size[0] = tot_num_work_items;
     local_work_size[0] = num_work_items_in_group;
 
-    status = clSetKernelArg(kernel_swap,
-        0,
-        sizeof(cl_mem),
-        &input_output_buffer_device);
-
-    if (status != CL_SUCCESS)
+    if (!is_complex_planar)
     {
-        std::cout << "The kernel set argument failure\n";
-        return EXIT_FAILURE;
+        status = clSetKernelArg(kernel_swap,
+            0,
+            sizeof(cl_mem),
+            &input_output_buffer_device);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
+    }
+    else
+    {
+        status = clSetKernelArg(kernel_swap,
+            0,
+            sizeof(cl_mem),
+            &input_output_buffer_device_R);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
+
+        status = clSetKernelArg(kernel_swap,
+            1,
+            sizeof(cl_mem),
+            &input_output_buffer_device_I);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
     }
 
     /*This is a warmup run*/
@@ -204,20 +245,57 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
         return EXIT_FAILURE;
     }
 
-    status = clEnqueueReadBuffer(commands,
-        input_output_buffer_device,
-        CL_TRUE,
-        0,
-        L * M * sizeof(T),
-        y,
-        0,
-        NULL,
-        NULL);
-
-    if (status != CL_SUCCESS)
+    if (!is_complex_planar)
     {
-        std::cout << "Error Reading output buffer.\n";
-        return EXIT_FAILURE;
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device,
+            CL_TRUE,
+            0,
+            L * M * sizeof(T),
+            y,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
+    }
+    else
+    {
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device_R,
+            CL_TRUE,
+            0,
+            L * M * sizeof(T),
+            y_R,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
+
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device_I,
+            CL_TRUE,
+            0,
+            L * M * sizeof(T),
+            y_I,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
     }
     *ptr_NDRangePureExecTimeMs = 0;
 #if 0
@@ -261,9 +339,13 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     return EXIT_SUCCESS;
 }
 template<typename T, typename C>
-void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
+void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
 {
     size_t avail_mem = AVAIL_MEM_SIZE / sizeof(T);
+    if (is_complex_planar)
+    {
+        avail_mem /= 2;
+    }
     T *full_mem = new T[avail_mem];
     T *te = full_mem; //= new T[avail_mem >> 1];
     T *to = full_mem + (avail_mem >> 1); //= new T[avail_mem >> 1];
@@ -350,7 +432,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
             }
         }
     }
-    memcpy(interm,z,L*M*sizeof(T));
+    //memcpy(interm,z,L*M*sizeof(T));
     int *cycle_map = new int[num_reduced_row * num_reduced_col * 2];
     /* The memory required by cycle_map canniot exceed 2 times row*col by design*/
 
@@ -365,7 +447,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
     {
         start_inx = cycle_map[++inx];
         std::cout << "\nCycle:" << (i + 1) << ">\t" << "(" << start_inx << "," << cycle_map[inx + 1] << ")";
-        snake(ta, tb, num_lines_loaded, start_inx, cycle_map[inx + 1], 0);
+        snake(ta, tb, num_lines_loaded, start_inx, cycle_map[inx + 1], 0, z);
 
         while (start_inx != cycle_map[++inx])
         {
@@ -375,7 +457,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
 
             std::cout << "\t" << "(" << cycle_map[inx] << "," << cycle_map[inx + 1] << ")";
             int action_var = (cycle_map[inx + 1] == start_inx) ? 2 : 1;
-            snake(ta, tb, num_lines_loaded, cycle_map[inx], cycle_map[inx + 1], action_var);
+            snake(ta, tb, num_lines_loaded, cycle_map[inx], cycle_map[inx + 1], action_var, z);
         }
     }
 
@@ -386,25 +468,57 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU()
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::verify_initial_trans_CPU()
 {
-    this->verify_initial_trans(x,z);
+    if (!is_complex_planar)
+    {
+        this->verify_initial_trans(x, z);
+    }
+    else
+    {
+        this->verify_initial_trans(x_R, z_R);
+        this->verify_initial_trans(x_I, z_I);
+    }
 }
 
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::verify_initial_trans_GPU()
 {
-    this->verify_initial_trans(x,y);
+    if (!is_complex_planar)
+    {
+        this->verify_initial_trans(x, y);
+    }
+    else
+    {
+        this->verify_initial_trans(x_R, y_R);
+        this->verify_initial_trans(x_I, y_I);
+    }
 }
 
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::verify_swap_CPU()
 {
-    this->verify_swap(x, z);
+    if (!is_complex_planar)
+    {
+        this->verify_swap(x, z);
+    }
+    else
+    {
+        this->verify_swap(x_R, z_R);
+        this->verify_swap(x_I, z_I);
+    }
 }
 
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::verify_swap_GPU()
 {
-    this->verify_swap(x, y);
+    if (!is_complex_planar)
+    {
+        this->verify_swap(x, y);
+    }
+    else
+    {
+        this->verify_swap(x_R, y_R);
+        this->verify_swap(x_I, y_I);
+    }
 }
 
 template<typename T, typename C>
@@ -428,18 +542,43 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
 
     global_work_size[0] = tot_num_work_items;
     local_work_size[0] = num_work_items_in_group;
-
-    status = clSetKernelArg(kernel,
-        0,
-        sizeof(cl_mem),
-        &input_output_buffer_device);
-
-    if (status != CL_SUCCESS)
+    if (!is_complex_planar)
     {
-        std::cout << "The kernel set argument failure\n";
-        return EXIT_FAILURE;
-    }
+        status = clSetKernelArg(kernel,
+            0,
+            sizeof(cl_mem),
+            &input_output_buffer_device);
 
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
+    }
+    else
+    {
+        status = clSetKernelArg(kernel,
+            0,
+            sizeof(cl_mem),
+            &input_output_buffer_device_R);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
+
+        status = clSetKernelArg(kernel,
+            1,
+            sizeof(cl_mem),
+            &input_output_buffer_device_I);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "The kernel set argument failure\n";
+            return EXIT_FAILURE;
+        }
+    }
     /*This is a warmup run*/
     status = clEnqueueNDRangeKernel(commands,
         kernel,
@@ -466,20 +605,57 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
         return EXIT_FAILURE;
     }
 
-    status = clEnqueueReadBuffer(commands,
-        input_output_buffer_device,
-        CL_TRUE,
-        0,
-        L * M * sizeof(T),
-        y,
-        0,
-        NULL,
-        NULL);
-
-    if (status != CL_SUCCESS)
+    if (!is_complex_planar)
     {
-        std::cout << "Error Reading output buffer.\n";
-        return EXIT_FAILURE;
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device,
+            CL_TRUE,
+            0,
+            L * M * sizeof(T),
+            y,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
+    }
+    else
+    {
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device_R,
+            CL_TRUE,
+            0,
+            L * M * sizeof(C),
+            y_R,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
+
+        status = clEnqueueReadBuffer(commands,
+            input_output_buffer_device_I,
+            CL_TRUE,
+            0,
+            L * M * sizeof(C),
+            y_I,
+            0,
+            NULL,
+            NULL);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "Error Reading output buffer.\n";
+            return EXIT_FAILURE;
+        }
     }
     *ptr_NDRangePureExecTimeMs = 0;
 #if 0
@@ -547,7 +723,7 @@ int test_inplace_transpose<T, C>::verify_swap(T* input, T* output)
 template<typename T, typename C>
 int test_inplace_transpose<T, C>::verify_initial_trans(T* input, T* output)
 {
-    
+
     for (int l = 0; l < small_dim; l++)
         for (int w = 0; w < small_dim; w++)
         {
@@ -572,9 +748,10 @@ int test_inplace_transpose<T, C>::verify_initial_trans(T* input, T* output)
                 }
             }
         }
+    
+
     return 0;
 };
-
 
 template<typename T, typename C>
 test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
@@ -593,31 +770,96 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
 
     start_inx = (small_dim == L) ? L : M*M;
 
-    x = new T[L*M];
-    y = new T[L*M];
-    z = new T[L*M];
-    interm = new T[L*M];
+    if (strcmp(argv[1], "P2P") == 0)
+    {
+        is_complex_planar = 1;
+    }
+    else
+    {
+        is_complex_planar = 0;
+    }
 
-    for (int l = 0; l<L; l++)
-        for (int m = 0; m<M; m++)
-        {
-            C* ptr_tmp_x = (C*)(&x[l*M + m]);
-            ptr_tmp_x[0] = rand() % 1000;
-            if ((sizeof(T) / sizeof(C)) == 2)
+    if (!is_complex_planar)
+    {
+        x = new T[L*M];
+        y = new T[L*M];
+        z = new T[L*M];
+        interm = new T[L*M];
+    }
+    else
+    {
+        x_R = new T[L*M];
+        x_I = new T[L*M];
+        y_R = new T[L*M];
+        y_I = new T[L*M];
+        z_R = new T[L*M];
+        z_I = new T[L*M];
+        interm_R = new T[L*M];
+        interm_I = new T[L*M];
+    }
+
+    if (!is_complex_planar)
+    {
+        for (int l = 0; l < L; l++)
+            for (int m = 0; m < M; m++)
             {
-                ptr_tmp_x[1] = ptr_tmp_x[0];
+                C* ptr_tmp_x = (C*)(&x[l*M + m]);
+                ptr_tmp_x[0] = rand() % 1000;
+                if ((sizeof(T) / sizeof(C)) == 2)
+                {
+                    ptr_tmp_x[1] = rand() % 1000;
+                }
             }
+    }
+    else
+    {
+        for (int l = 0; l < L; l++)
+            for (int m = 0; m < M; m++)
+            {
+                C* ptr_tmp_x = (C*)(&x_R[l*M + m]);
+                ptr_tmp_x[0] = rand() % 1000;
+                ptr_tmp_x = (C*)(&x_I[l*M + m]);
+                ptr_tmp_x[0] = rand() % 1000;
+            }
+    }
+
+    if (!is_complex_planar)
+    {
+
+        input_output_buffer_device = clCreateBuffer(context,
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            L * M * sizeof(T),
+            x,
+            &status);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
+        }
+    }
+    else
+    {
+        input_output_buffer_device_R = clCreateBuffer(context,
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            L * M * sizeof(T),
+            x_R,
+            &status);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
         }
 
-    input_output_buffer_device = clCreateBuffer(context,
-        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-        L * M * sizeof(T),
-        x,
-        &status);
+        input_output_buffer_device_I = clCreateBuffer(context,
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            L * M * sizeof(T),
+            x_I,
+            &status);
 
-    if (status != CL_SUCCESS)
-    {
-        std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
+        }
     }
 
    /* for (int l = 0; l<L; l++)
@@ -631,31 +873,55 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
                 ptr_tmp_y[1] = ptr_tmp_x[1];
             }
         }*/
-
-    memcpy(z, x, L*M*sizeof(T));
+    if (!is_complex_planar)
+    {
+        memcpy(z, x, L*M*sizeof(T));
+    }
+    else
+    {
+        memcpy(z_R, x_R, L*M*sizeof(T));
+        memcpy(z_I, x_I, L*M*sizeof(T));
+    }
 }
 
 template<typename T, typename C>
 test_inplace_transpose<T, C>::~test_inplace_transpose()
 {
-    delete[] x;
-    delete[] y;
-    delete[] z;
+    if (!is_complex_planar)
+    {
+        delete[] x;
+        delete[] y;
+        delete[] z;
+        delete[] interm;
+    }
+    else
+    {
+        delete[] x_R;
+        delete[] y_R;
+        delete[] z_R;
+        delete[] interm_R;
+        delete[] x_I;
+        delete[] y_I;
+        delete[] z_I;
+        delete[] interm_I;
+    }
 }
 
 template<typename T, typename C>
-void test_inplace_transpose<T, C>::inplace_transpose_square_CPU(int start_x)
+void test_inplace_transpose<T, C>::inplace_transpose_square_CPU(int start_x, T* z)
 {
-	for(int l=0; l<small_dim; l++)
-		for(int m=0; m<small_dim; m++)
-		{
-			if(m<l)
-				continue;
 
-			T tmp = z[l*width + m + start_x];
-			z[l*width + m + start_x] = z[m*width + l + start_x];
-			z[m*width + l + start_x] = tmp;
-		}
+    for (int l = 0; l < small_dim; l++)
+        for (int m = 0; m < small_dim; m++)
+        {
+            if (m < l)
+                continue;
+
+            T tmp = z[l*width + m + start_x];
+            z[l*width + m + start_x] = z[m*width + l + start_x];
+            z[m*width + l + start_x] = tmp;
+        }
+    
 }
 
 int opencl_build_kernel(char** argv,
@@ -846,15 +1112,34 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
 
     test_inplace_transpose<T, C> test_inplace_transpose(argv, context, L, M);
 
-    test_inplace_transpose.inplace_transpose_square_CPU(0);
-    test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx);
+    if (!test_inplace_transpose.is_complex_planar)
+    {
+        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z);
+        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z);
+    }
+    else
+    {
+        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z_R);
+        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z_I);
+        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z_R);
+        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z_I);
+    }
 
     test_inplace_transpose.inplace_transpose_square_GPU(argv, commands, kernel_ST, &NDRangePureExecTimeMs);
 
     test_inplace_transpose.verify_initial_trans_CPU();
     test_inplace_transpose.verify_initial_trans_GPU();
 
-    test_inplace_transpose.inplace_transpose_swap_CPU();
+    if (!test_inplace_transpose.is_complex_planar)
+    {
+        test_inplace_transpose.inplace_transpose_swap_CPU(test_inplace_transpose.z);
+    }
+    else
+    {
+        test_inplace_transpose.inplace_transpose_swap_CPU(test_inplace_transpose.z_R);
+        test_inplace_transpose.inplace_transpose_swap_CPU(test_inplace_transpose.z_I);
+    }
+
     test_inplace_transpose.verify_swap_CPU();
 
     test_inplace_transpose.inplace_transpose_swap_GPU(argv, commands, kernel_swap, &NDRangePureExecTimeMs);
@@ -882,6 +1167,10 @@ int main(int argc, char** argv)
         input_output_type = REAL_TO_REAL;
     }
 
+    if (strcmp(argv[1], "P2P") == 0)
+    {
+        input_output_type = PLANAR_TO_PLANAR;
+    }
     /*initialize the command queues and build kernel*/
     status = opencl_build_kernel(argv,
         &context,
