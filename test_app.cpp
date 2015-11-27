@@ -64,9 +64,9 @@ private:
     int M;
     int small_dim;
     int big_dim;
-    int width;
-    
+    int width;  
     size_t local_work_size_swap;
+    size_t global_work_size_trans;
 };
 
 template<typename T, typename C>
@@ -532,7 +532,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
     size_t global_work_size[MAX_DIMS] = { 1,1,1 };
     size_t local_work_size[MAX_DIMS] = { 1,1,1 };
     size_t num_work_items_in_group = 256;
-    int tot_num_work_items = num_work_items_in_group * atoi(argv[6]);
+    int tot_num_work_items = global_work_size_trans;
     cl_event warmup_event;
     cl_event perf_event[NUM_PERF_ITERATIONS];
     /*size_t global_work_offset[MAX_DIMS] = {0,0,0};*/
@@ -760,7 +760,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
                                                int inp_M)
 {
     cl_int status;
-
+    
     L = inp_L;
     M = inp_M;
 
@@ -778,6 +778,14 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
     {
         is_complex_planar = 0;
     }
+    int reShapeFactor = 2, wg_slice;
+    if (small_dim % (16 * reShapeFactor) == 0)
+        wg_slice = small_dim / 16 / reShapeFactor;
+    else
+        wg_slice = (small_dim / (16 * reShapeFactor)) + 1;
+
+    global_work_size_trans = wg_slice*(wg_slice + 1) / 2 * 16 * 16;
+    global_work_size_trans *= 2;
 
     if (!is_complex_planar)
     {
@@ -1106,8 +1114,8 @@ int opencl_build_kernel(char** argv,
 template<typename T, typename C>
 int master_test_function(char** argv, cl_context context, cl_command_queue commands, cl_kernel kernel_ST, cl_kernel kernel_swap)
 {
-    const int L = atoi(argv[4]);
-    const int M = atoi(argv[5]);
+    const int L = atoi(argv[5]);
+    const int M = atoi(argv[4]);
     cl_double           NDRangePureExecTimeMs;
 
     test_inplace_transpose<T, C> test_inplace_transpose(argv, context, L, M);
