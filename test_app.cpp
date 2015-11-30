@@ -362,6 +362,9 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
     local_work_size_swap = num_lines_loaded << 4;
     local_work_size_swap = (local_work_size_swap > 256) ? 256 : local_work_size_swap;
 
+    size_t num_threads_processing_row = (256 / local_work_size_swap) * 16;
+    local_work_size_swap = num_lines_loaded * num_threads_processing_row;
+
     if (L == small_dim)
     {
         num_reduced_row = std::ceil((float)small_dim / (float)(num_lines_loaded));
