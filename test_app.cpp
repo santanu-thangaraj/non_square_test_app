@@ -18,6 +18,7 @@ public:
 
    void inplace_transpose_swap_CPU(T* z);
    int inplace_transpose_swap_GPU(char** argv,
+                                   cl_context context,
                                    cl_command_queue  commands,
                                    cl_kernel kernel,
                                    cl_double *ptr_NDRangePureExecTimeMs);
@@ -45,7 +46,7 @@ public:
    T* x; //original data
    T* y; // GPU output
    T* z; // CPU output
-   T* interm; //CPU intermediate data
+ //  T* interm; //CPU intermediate data
 
    cl_mem input_output_buffer_device_R;
    cl_mem input_output_buffer_device_I;
@@ -55,8 +56,10 @@ public:
    T* y_I;
    T* z_R;
    T* z_I;
-   T* interm_R;
-   T* interm_I;
+//   T* interm_R;
+//   T* interm_I;
+   bool   use_global_memory;
+   size_t global_mem_requirement_in_bytes;
 
 private:
 
@@ -162,6 +165,7 @@ int get_num_lines_to_be_loaded(int max_capacity, int L)
 
 template<typename T, typename C>
 int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
+                                                                cl_context context,
                                                                 cl_command_queue  commands,
                                                                 cl_kernel kernel_swap,
                                                                 cl_double *ptr_NDRangePureExecTimeMs)
@@ -180,6 +184,21 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
 
     global_work_size[0] = tot_num_work_items;
     local_work_size[0] = num_work_items_in_group;
+    cl_mem cl_tmp_buffer;
+
+    if (use_global_memory)
+    {
+        cl_tmp_buffer = clCreateBuffer(context,
+            CL_MEM_READ_WRITE ,
+            global_mem_requirement_in_bytes,
+            NULL,
+            &status);
+
+        if (status != CL_SUCCESS)
+        {
+            std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
+        }
+    }
 
     if (!is_complex_planar)
     {
@@ -192,6 +211,20 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
         {
             std::cout << "The kernel set argument failure\n";
             return EXIT_FAILURE;
+        }
+
+        if (use_global_memory)
+        {
+            status = clSetKernelArg(kernel_swap,
+                1,
+                sizeof(cl_mem),
+                &cl_tmp_buffer);
+
+            if (status != CL_SUCCESS)
+            {
+                std::cout << "The kernel set argument failure\n";
+                return EXIT_FAILURE;
+            }
         }
     }
     else
@@ -217,7 +250,22 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             std::cout << "The kernel set argument failure\n";
             return EXIT_FAILURE;
         }
+
+        if (use_global_memory)
+        {
+            status = clSetKernelArg(kernel_swap,
+                2,
+                sizeof(cl_mem),
+                &cl_tmp_buffer);
+
+            if (status != CL_SUCCESS)
+            {
+                std::cout << "The kernel set argument failure\n";
+                return EXIT_FAILURE;
+            }
+        }
     }
+
 
     /*This is a warmup run*/
     status = clEnqueueNDRangeKernel(commands,
@@ -336,8 +384,15 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS));
     *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS + 1) / 2];
 #endif
+    if (use_global_memory)
+    {
+        clReleaseMemObject(cl_tmp_buffer);
+    }
     return EXIT_SUCCESS;
 }
+
+#define GLOBAL_MEM_FACTOR 2
+
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
 {
@@ -346,15 +401,23 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
     {
         avail_mem /= 2;
     }
+
+    int max_capacity = (avail_mem >> 1) / small_dim;
+
+    use_global_memory = 0;
+
+    if (max_capacity <= 1)
+    {
+        max_capacity = GLOBAL_MEM_FACTOR;
+        use_global_memory = 1;
+        avail_mem = GLOBAL_MEM_FACTOR * (small_dim * 2);
+        global_mem_requirement_in_bytes = avail_mem * sizeof(T);
+    }
+
     T *full_mem = new T[avail_mem];
     T *te = full_mem; //= new T[avail_mem >> 1];
     T *to = full_mem + (avail_mem >> 1); //= new T[avail_mem >> 1];
-    int max_capacity = (avail_mem >> 1) / small_dim;
-    if (max_capacity <= 0)
-    {
-        std::cout << "\nIn-place transpose cannot be performed within specified memory constraints.\n";
-        exit(1);
-    }
+
     int num_lines_loaded = get_num_lines_to_be_loaded(max_capacity, small_dim);
     int num_reduced_row; 
     int num_reduced_col;
@@ -449,7 +512,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
     for (i = 0; i < cycle_map[0]; i++)
     {
         start_inx = cycle_map[++inx];
-        std::cout << "\nCycle:" << (i + 1) << ">\t" << "(" << start_inx << "," << cycle_map[inx + 1] << ")";
+       // std::cout << "\nCycle:" << (i + 1) << ">\t" << "(" << start_inx << "," << cycle_map[inx + 1] << ")";
         snake(ta, tb, num_lines_loaded, start_inx, cycle_map[inx + 1], 0, z);
 
         while (start_inx != cycle_map[++inx])
@@ -458,7 +521,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
             ta = tb;
             tb = ttmp;
 
-            std::cout << "\t" << "(" << cycle_map[inx] << "," << cycle_map[inx + 1] << ")";
+      //      std::cout << "\t" << "(" << cycle_map[inx] << "," << cycle_map[inx + 1] << ")";
             int action_var = (cycle_map[inx + 1] == start_inx) ? 2 : 1;
             snake(ta, tb, num_lines_loaded, cycle_map[inx], cycle_map[inx + 1], action_var, z);
         }
@@ -795,7 +858,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
         x = new T[L*M];
         y = new T[L*M];
         z = new T[L*M];
-        interm = new T[L*M];
+   //     interm = new T[L*M];
     }
     else
     {
@@ -805,8 +868,8 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
         y_I = new T[L*M];
         z_R = new T[L*M];
         z_I = new T[L*M];
-        interm_R = new T[L*M];
-        interm_I = new T[L*M];
+  //      interm_R = new T[L*M];
+  //      interm_I = new T[L*M];
     }
 
     if (!is_complex_planar)
@@ -836,11 +899,24 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
 
     if (!is_complex_planar)
     {
+        memcpy(z, x, L*M*sizeof(T));
+        memcpy(y, x, L*M*sizeof(T));
+    }
+    else
+    {
+        memcpy(z_R, x_R, L*M*sizeof(T));
+        memcpy(z_I, x_I, L*M*sizeof(T));
+        memcpy(y_R, x_R, L*M*sizeof(T));
+        memcpy(y_I, x_I, L*M*sizeof(T));
+    }
+
+    if (!is_complex_planar)
+    {
 
         input_output_buffer_device = clCreateBuffer(context,
-            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
             L * M * sizeof(T),
-            x,
+            y,
             &status);
 
         if (status != CL_SUCCESS)
@@ -851,9 +927,9 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
     else
     {
         input_output_buffer_device_R = clCreateBuffer(context,
-            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
             L * M * sizeof(T),
-            x_R,
+            y_R,
             &status);
 
         if (status != CL_SUCCESS)
@@ -862,9 +938,9 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
         }
 
         input_output_buffer_device_I = clCreateBuffer(context,
-            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
             L * M * sizeof(T),
-            x_I,
+            y_I,
             &status);
 
         if (status != CL_SUCCESS)
@@ -884,15 +960,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
                 ptr_tmp_y[1] = ptr_tmp_x[1];
             }
         }*/
-    if (!is_complex_planar)
-    {
-        memcpy(z, x, L*M*sizeof(T));
-    }
-    else
-    {
-        memcpy(z_R, x_R, L*M*sizeof(T));
-        memcpy(z_I, x_I, L*M*sizeof(T));
-    }
+
 }
 
 template<typename T, typename C>
@@ -903,18 +971,21 @@ test_inplace_transpose<T, C>::~test_inplace_transpose()
         delete[] x;
         delete[] y;
         delete[] z;
-        delete[] interm;
+  //      delete[] interm;
+        clReleaseMemObject(input_output_buffer_device);
     }
     else
     {
         delete[] x_R;
         delete[] y_R;
         delete[] z_R;
-        delete[] interm_R;
+ //       delete[] interm_R;
         delete[] x_I;
         delete[] y_I;
         delete[] z_I;
-        delete[] interm_I;
+  //      delete[] interm_I;
+        clReleaseMemObject(input_output_buffer_device_R);
+        clReleaseMemObject(input_output_buffer_device_I);
     }
 }
 
@@ -1095,7 +1166,83 @@ int opencl_build_kernel(char** argv,
         std::cout << "Error: Failed to create kernel!\n";
         return EXIT_FAILURE;
     }
-    
+
+    err = clReleaseProgram(program);
+    if (err != CL_SUCCESS)
+    {
+        std::cout << "Error releasing program\n";
+        return EXIT_FAILURE;
+    }
+    free(src);
+
+    filename = argv[6];
+#ifdef OS_LINUX
+    strcpy(full_path, "./kernel_files/");
+#else
+    strcpy(full_path, ".\\kernel_files\\");
+#endif
+    strcat(full_path, filename);
+
+    file = fopen(full_path, "rb");
+
+    if (file == NULL)
+    {
+        std::cout << "\nFile containing the kernel code(\".cl\") not found.\n";
+    }
+
+    /* obtain file size:*/
+    fd = fileno(file); //if you have a stream (e.g. from fopen), not a file descriptor.
+    fstat(fd, &buf);
+    srcsize = buf.st_size;
+
+    // allocate memory to contain the whole file:
+    src = (char*)malloc(sizeof(char)*srcsize);
+    if (src == NULL)
+    {
+        std::cout << "\nMemory allocation failed.\n";
+        return EXIT_FAILURE;
+    }
+
+    f_err = fread(src, 1, srcsize, file);
+    if (f_err != srcsize)
+    {
+        std::cout << "\nfread failed.\n";
+        perror("The following error occurred");
+        return EXIT_FAILURE;
+    }
+    fclose(file);
+
+    const char *srcptr_swap[] = { src };
+
+    program = clCreateProgramWithSource(
+        *ptr_context,
+        1,
+        srcptr_swap,
+        &srcsize,
+        &err);
+
+    if (err != CL_SUCCESS)
+    {
+        std::cout <<
+            "Error: Loading Binary into cl_program \
+                           (clCreateProgramWithBinary)\n";
+        return EXIT_FAILURE;
+    }
+
+
+    err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+
+    if (err != CL_SUCCESS)
+    {
+        size_t len;
+        char buffer[2048];
+
+        std::cout << "Error: Failed to build program executable!\n";
+        clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, sizeof(buffer), buffer, &len);
+        std::cout << buffer << "\n";
+        return EXIT_FAILURE;
+    }
+
     *ptr_kernel_swap = clCreateKernel(program, "swap_nonsquare", &err);
     if (!(*ptr_kernel_swap) || err != CL_SUCCESS)
     {
@@ -1109,6 +1256,7 @@ int opencl_build_kernel(char** argv,
         std::cout << "Error releasing program\n";
         return EXIT_FAILURE;
     }
+    free(src);
 
     return EXIT_SUCCESS;
 
@@ -1153,7 +1301,7 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
 
     test_inplace_transpose.verify_swap_CPU();
 
-    test_inplace_transpose.inplace_transpose_swap_GPU(argv, commands, kernel_swap, &NDRangePureExecTimeMs);
+    test_inplace_transpose.inplace_transpose_swap_GPU(argv, context, commands, kernel_swap, &NDRangePureExecTimeMs);
     //test_inplace_transpose.verify_interm_swap_GPU();
     test_inplace_transpose.verify_swap_GPU();
 
