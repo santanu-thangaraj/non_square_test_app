@@ -1,9 +1,12 @@
 
 #include <iostream>
 #include <CL/cl.h>
+#include <algorithm>
 #include "test_app.h"
 
-#define AVAIL_MEM_SIZE 32768
+#define AVAIL_MEM_SIZE (32768)
+
+#define SWAP_WZ_MULT 350
 
 template<typename T, typename C>
 class test_inplace_transpose
@@ -162,7 +165,7 @@ int get_num_lines_to_be_loaded(int max_capacity, int L)
     }
     return max_factor;
 }
-
+#define FACTOR 2
 template<typename T, typename C>
 int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
                                                                 cl_context context,
@@ -182,7 +185,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     int i;
     cl_double perf_nums[NUM_PERF_ITERATIONS];
 
-    global_work_size[0] = tot_num_work_items;
+	global_work_size[0] = tot_num_work_items *SWAP_WZ_MULT * FACTOR;
     local_work_size[0] = num_work_items_in_group;
     cl_mem cl_tmp_buffer;
 
@@ -190,7 +193,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     {
         cl_tmp_buffer = clCreateBuffer(context,
             CL_MEM_READ_WRITE ,
-            global_mem_requirement_in_bytes,
+            global_mem_requirement_in_bytes * SWAP_WZ_MULT,
             NULL,
             &status);
 
@@ -213,7 +216,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             return EXIT_FAILURE;
         }
 
-        if (use_global_memory)
+        if (0/*use_global_memory*/)
         {
             status = clSetKernelArg(kernel_swap,
                 1,
@@ -251,7 +254,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             return EXIT_FAILURE;
         }
 
-        if (use_global_memory)
+        if (0/*use_global_memory*/)
         {
             status = clSetKernelArg(kernel_swap,
                 2,
@@ -286,7 +289,13 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
 
     clWaitForEvents(1, &warmup_event);
 
+	clGetEventProfilingInfo(warmup_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+	clGetEventProfilingInfo(warmup_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+
     status = clReleaseEvent(warmup_event);
+
+	*ptr_NDRangePureExecTimeMs = (cl_double)(end - start)*(cl_double)(1e-06);
+
     if (status != CL_SUCCESS)
     {
         std::cout << "Error releasing events\n";
@@ -345,12 +354,13 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             return EXIT_FAILURE;
         }
     }
-    *ptr_NDRangePureExecTimeMs = 0;
+   
 #if 0
+	* ptr_NDRangePureExecTimeMs = 0;
     for (i = 0; i < NUM_PERF_ITERATIONS; i++)
     {
         status = clEnqueueNDRangeKernel(commands,
-            kernel,
+            kernel_swap,
             SUPPORTED_WORK_DIM,
             NULL,
             global_work_size,
@@ -381,8 +391,8 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     }
 
     /*Take the median of the performance numbers*/
-    std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS));
-    *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS + 1) / 2];
+    std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS - 1));
+    *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS) / 2];
 #endif
     if (use_global_memory)
     {
@@ -391,7 +401,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     return EXIT_SUCCESS;
 }
 
-#define GLOBAL_MEM_FACTOR 2
+#define GLOBAL_MEM_FACTOR 1
 
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
@@ -406,7 +416,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
 
     use_global_memory = 0;
 
-    if (max_capacity <= 1)
+    if (max_capacity < 1)
     {
         max_capacity = GLOBAL_MEM_FACTOR;
         use_global_memory = 1;
@@ -427,6 +437,7 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
 
     size_t num_threads_processing_row = (256 / local_work_size_swap) * 16;
     local_work_size_swap = num_lines_loaded * num_threads_processing_row;
+    local_work_size_swap = (local_work_size_swap > 256) ? 256 : local_work_size_swap;
 
     if (L == small_dim)
     {
@@ -662,9 +673,15 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
         return EXIT_FAILURE;
     }
 
-    clWaitForEvents(1, &warmup_event);
+	clWaitForEvents(1, &warmup_event);
 
-    status = clReleaseEvent(warmup_event);
+	clGetEventProfilingInfo(warmup_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+	clGetEventProfilingInfo(warmup_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+
+	status = clReleaseEvent(warmup_event);
+
+	*ptr_NDRangePureExecTimeMs = (cl_double)(end - start)*(cl_double)(1e-06);
+
     if (status != CL_SUCCESS)
     {
         std::cout << "Error releasing events\n";
@@ -723,8 +740,10 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
             return EXIT_FAILURE;
         }
     }
-    *ptr_NDRangePureExecTimeMs = 0;
+    
 #if 0
+	* ptr_NDRangePureExecTimeMs = 0;
+
     for (i = 0; i < NUM_PERF_ITERATIONS; i++)
     {
         status = clEnqueueNDRangeKernel(commands,
@@ -759,8 +778,8 @@ int test_inplace_transpose<T, C>::inplace_transpose_square_GPU(char** argv,
     }
 
     /*Take the median of the performance numbers*/
-    std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS));
-    *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS + 1) / 2];
+    std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS - 1));
+    *ptr_NDRangePureExecTimeMs = perf_nums[NUM_PERF_ITERATIONS / 2];
 #endif
     return EXIT_SUCCESS;
 };
@@ -1285,6 +1304,7 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
     }
 
     test_inplace_transpose.inplace_transpose_square_GPU(argv, commands, kernel_ST, &NDRangePureExecTimeMs);
+    std::cout << "Transpose kernel: " << NDRangePureExecTimeMs << "\n";
 
     test_inplace_transpose.verify_initial_trans_CPU();
     test_inplace_transpose.verify_initial_trans_GPU();
@@ -1302,6 +1322,7 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
     test_inplace_transpose.verify_swap_CPU();
 
     test_inplace_transpose.inplace_transpose_swap_GPU(argv, context, commands, kernel_swap, &NDRangePureExecTimeMs);
+    std::cout << "Swap kernel: " << NDRangePureExecTimeMs << "\n";
     //test_inplace_transpose.verify_interm_swap_GPU();
     test_inplace_transpose.verify_swap_GPU();
 

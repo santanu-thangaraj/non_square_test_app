@@ -15,7 +15,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 ********************************************************************/
 
 #define SUPPORTED_WORK_DIM 1
-#define NUM_PERF_ITERATIONS 1
+#define NUM_PERF_ITERATIONS 2
 #define MAX_DIMS 3
 enum INPUT_OUTPUT_TYPE_T
 {
