@@ -6,8 +6,6 @@
 
 #define AVAIL_MEM_SIZE (32768)
 
-#define SWAP_WZ_MULT 350
-
 template<typename T, typename C>
 class test_inplace_transpose
 {
@@ -61,8 +59,6 @@ public:
    T* z_I;
 //   T* interm_R;
 //   T* interm_I;
-   bool   use_global_memory;
-   size_t global_mem_requirement_in_bytes;
 
 private:
 
@@ -71,7 +67,7 @@ private:
     int small_dim;
     int big_dim;
     int width;  
-    size_t local_work_size_swap;
+    size_t local_work_size_swap, num_grps_pro_row, swap_wz_inp_cycle_mult;
     size_t global_work_size_trans;
 };
 
@@ -165,7 +161,7 @@ int get_num_lines_to_be_loaded(int max_capacity, int L)
     }
     return max_factor;
 }
-#define FACTOR 2
+
 template<typename T, typename C>
 int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
                                                                 cl_context context,
@@ -177,7 +173,7 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     size_t global_work_size[MAX_DIMS] = { 1,1,1 };
     size_t local_work_size[MAX_DIMS] = { 1,1,1 };
     size_t num_work_items_in_group = local_work_size_swap;
-    int tot_num_work_items = num_work_items_in_group;
+    int tot_num_work_items = num_work_items_in_group * num_grps_pro_row;
     cl_event warmup_event;
     cl_event perf_event[NUM_PERF_ITERATIONS];
     /*size_t global_work_offset[MAX_DIMS] = {0,0,0};*/
@@ -185,23 +181,10 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     int i;
     cl_double perf_nums[NUM_PERF_ITERATIONS];
 
-	global_work_size[0] = tot_num_work_items *SWAP_WZ_MULT * FACTOR;
+	global_work_size[0] = tot_num_work_items * swap_wz_inp_cycle_mult;
     local_work_size[0] = num_work_items_in_group;
     cl_mem cl_tmp_buffer;
 
-    if (use_global_memory)
-    {
-        cl_tmp_buffer = clCreateBuffer(context,
-            CL_MEM_READ_WRITE ,
-            global_mem_requirement_in_bytes * SWAP_WZ_MULT,
-            NULL,
-            &status);
-
-        if (status != CL_SUCCESS)
-        {
-            std::cout << "ERROR! Allocation of GPU input buffer failed.\n";
-        }
-    }
 
     if (!is_complex_planar)
     {
@@ -216,19 +199,6 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             return EXIT_FAILURE;
         }
 
-        if (0/*use_global_memory*/)
-        {
-            status = clSetKernelArg(kernel_swap,
-                1,
-                sizeof(cl_mem),
-                &cl_tmp_buffer);
-
-            if (status != CL_SUCCESS)
-            {
-                std::cout << "The kernel set argument failure\n";
-                return EXIT_FAILURE;
-            }
-        }
     }
     else
     {
@@ -254,19 +224,6 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
             return EXIT_FAILURE;
         }
 
-        if (0/*use_global_memory*/)
-        {
-            status = clSetKernelArg(kernel_swap,
-                2,
-                sizeof(cl_mem),
-                &cl_tmp_buffer);
-
-            if (status != CL_SUCCESS)
-            {
-                std::cout << "The kernel set argument failure\n";
-                return EXIT_FAILURE;
-            }
-        }
     }
 
 
@@ -394,14 +351,10 @@ int test_inplace_transpose<T, C>::inplace_transpose_swap_GPU(char** argv,
     std::sort(perf_nums, (perf_nums + NUM_PERF_ITERATIONS - 1));
     *ptr_NDRangePureExecTimeMs = perf_nums[(NUM_PERF_ITERATIONS) / 2];
 #endif
-    if (use_global_memory)
-    {
-        clReleaseMemObject(cl_tmp_buffer);
-    }
+
     return EXIT_SUCCESS;
 }
 
-#define GLOBAL_MEM_FACTOR 1
 
 template<typename T, typename C>
 void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
@@ -412,32 +365,26 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
         avail_mem /= 2;
     }
 
-    int max_capacity = (avail_mem >> 1) / small_dim;
-
-    use_global_memory = 0;
-
-    if (max_capacity < 1)
-    {
-        max_capacity = GLOBAL_MEM_FACTOR;
-        use_global_memory = 1;
-        avail_mem = GLOBAL_MEM_FACTOR * (small_dim * 2);
-        global_mem_requirement_in_bytes = avail_mem * sizeof(T);
-    }
-
     T *full_mem = new T[avail_mem];
     T *te = full_mem; //= new T[avail_mem >> 1];
     T *to = full_mem + (avail_mem >> 1); //= new T[avail_mem >> 1];
 
-    int num_lines_loaded = get_num_lines_to_be_loaded(max_capacity, small_dim);
+    int num_lines_loaded = 1, num_elements_loaded;// get_num_lines_to_be_loaded(max_capacity, small_dim);
     int num_reduced_row; 
     int num_reduced_col;
 
-    local_work_size_swap = num_lines_loaded << 4;
-    local_work_size_swap = (local_work_size_swap > 256) ? 256 : local_work_size_swap;
-
-    size_t num_threads_processing_row = (256 / local_work_size_swap) * 16;
-    local_work_size_swap = num_lines_loaded * num_threads_processing_row;
-    local_work_size_swap = (local_work_size_swap > 256) ? 256 : local_work_size_swap;
+    if ((avail_mem >> 1) > small_dim)
+    {
+        local_work_size_swap = (small_dim < 256) ? small_dim : 256;
+        num_elements_loaded = small_dim;
+        num_grps_pro_row = 1;
+    }
+    else
+    {
+        num_grps_pro_row = (small_dim << 1) / avail_mem;
+        num_elements_loaded = avail_mem >> 1;
+        local_work_size_swap = (num_elements_loaded < 256) ? num_elements_loaded : 256;
+    }
 
     if (L == small_dim)
     {
@@ -454,67 +401,12 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
     and thus reducing the amount of swaps required to be done using the snake function*/
     int i;
 
-    if (num_lines_loaded > 1)
-    {
-        if (L == small_dim)
-        {
-            for (i = 0; i < big_dim; i += 2 * num_lines_loaded)
-            {
-                // read
-                for (int p = 0; p < num_lines_loaded; p++)
-                {
-                    for (int j = 0; j < small_dim; j++)
-                    {
-                        te[p*small_dim + j] = z[i*small_dim + (2 * p + 0)*small_dim + j];
-                        to[p*small_dim + j] = z[i*small_dim + (2 * p + 1)*small_dim + j];
-                    }
-                }
-
-                // write
-                for (int p = 0; p < num_lines_loaded; p++)
-                {
-                    for (int j = 0; j < small_dim; j++)
-                    {
-                        z[i*small_dim + 0 + p*small_dim + j] = te[p*small_dim + j];
-                        z[i*small_dim + num_lines_loaded*small_dim + p*small_dim + j] = to[p*small_dim + j];
-                    }
-                }
-            }
-        }
-        else
-        {
-
-            for (i = 0; i < small_dim; i += num_lines_loaded)
-            {
-                // read
-                for (int p = 0; p < num_lines_loaded; p++)
-                {
-                    for (int j = 0; j < small_dim; j++)
-                    {
-                        full_mem[(2 * p) * small_dim + j] = z[i*small_dim + p*small_dim + j];
-                        full_mem[(2 * p + 1) * small_dim + j] = z[small_dim * small_dim + i*small_dim + p*small_dim + j];
-                    }
-                }
-
-                // write
-                for (int p = 0; p < num_lines_loaded; p++)
-                {
-                    for (int j = 0; j < small_dim; j++)
-                    {
-                        z[i*small_dim + p*small_dim + j] = full_mem[p * small_dim + j];
-                        z[small_dim * small_dim + i*small_dim + p*small_dim + j] = full_mem[(num_lines_loaded + p) * small_dim + j];
-
-                    }
-                }
-            }
-        }
-    }
     //memcpy(interm,z,L*M*sizeof(T));
     int *cycle_map = new int[num_reduced_row * num_reduced_col * 2];
     /* The memory required by cycle_map canniot exceed 2 times row*col by design*/
 
     get_cycles(cycle_map, num_reduced_row, num_reduced_col);
-
+    swap_wz_inp_cycle_mult = cycle_map[0];
     T *ta = te;
     T *tb = to;
     T *ttmp;
