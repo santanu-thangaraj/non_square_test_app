@@ -59,13 +59,16 @@ public:
    T* z_I;
 //   T* interm_R;
 //   T* interm_I;
+   bool   use_global_memory;
+   size_t global_mem_requirement_in_bytes;
+   int small_dim;
+   int big_dim;
 
 private:
 
     int L;
     int M;
-    int small_dim;
-    int big_dim;
+
     int width;  
     size_t local_work_size_swap, num_grps_pro_row, swap_wz_inp_cycle_mult;
     size_t global_work_size_trans;
@@ -389,11 +392,11 @@ void test_inplace_transpose<T, C>::inplace_transpose_swap_CPU(T* z)
     if (L == small_dim)
     {
         num_reduced_row = std::ceil((float)small_dim / (float)(num_lines_loaded));
-        num_reduced_col = 2;
+        num_reduced_col = big_dim / small_dim;
     }
     else
     {
-        num_reduced_row = 2;
+        num_reduced_row = big_dim / small_dim;
         num_reduced_col = std::ceil((float)small_dim / (float)(num_lines_loaded)); 
     }
 
@@ -706,17 +709,12 @@ int test_inplace_transpose<T, C>::verify_initial_trans(T* input, T* output)
         {
             for (int comp = 0; comp < (sizeof(T) / sizeof(C)); comp++)
             {
-                C* ptr_tmp_input = (C*)(&input[l + w * width]);
-                C* ptr_tmp_output = (C*)(&output[l * width + w]);
 
-                if (ptr_tmp_input[comp] != ptr_tmp_output[comp])
+                for (int i = 0; i < big_dim / small_dim; i++)
                 {
-                    std::cout << "Fail\n";
-                    return 1;
-                }
 
-                ptr_tmp_input = (C*)(&input[l + w * width + start_inx]);
-                ptr_tmp_output = (C*)(&output[l * width + w + start_inx]);
+                    C* ptr_tmp_input = (C*)(&input[l + w * width + i * start_inx]);
+                    C* ptr_tmp_output = (C*)(&output[l * width + w + i * start_inx]);
 
                 if (ptr_tmp_input[comp] != ptr_tmp_output[comp])
                 {
@@ -724,6 +722,7 @@ int test_inplace_transpose<T, C>::verify_initial_trans(T* input, T* output)
                     return 1;
                 }
             }
+        }
         }
     
 
@@ -742,7 +741,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
     M = inp_M;
 
     small_dim = (L < M) ? L : M;
-    big_dim = small_dim * 2;
+    big_dim = (L > M) ? L : M;
     width = M;
 
     start_inx = (small_dim == L) ? L : M*M;
@@ -762,7 +761,7 @@ test_inplace_transpose<T,C>::test_inplace_transpose(char** argv,
         wg_slice = (small_dim / (16 * reShapeFactor)) + 1;
 
     global_work_size_trans = wg_slice*(wg_slice + 1) / 2 * 16 * 16;
-    global_work_size_trans *= 2;
+    global_work_size_trans *= (big_dim / small_dim);
 
     if (!is_complex_planar)
     {
@@ -1184,15 +1183,18 @@ int master_test_function(char** argv, cl_context context, cl_command_queue comma
 
     if (!test_inplace_transpose.is_complex_planar)
     {
-        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z);
-        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z);
+        for (int i = 0; i < test_inplace_transpose.big_dim / test_inplace_transpose.small_dim; i++)
+        { 
+            test_inplace_transpose.inplace_transpose_square_CPU(i * test_inplace_transpose.start_inx, test_inplace_transpose.z);
+        }
     }
     else
     {
-        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z_R);
-        test_inplace_transpose.inplace_transpose_square_CPU(0, test_inplace_transpose.z_I);
-        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z_R);
-        test_inplace_transpose.inplace_transpose_square_CPU(test_inplace_transpose.start_inx, test_inplace_transpose.z_I);
+        for (int i = 0; i < test_inplace_transpose.big_dim / test_inplace_transpose.small_dim; i++)
+        {
+            test_inplace_transpose.inplace_transpose_square_CPU(i * test_inplace_transpose.start_inx, test_inplace_transpose.z_R);
+            test_inplace_transpose.inplace_transpose_square_CPU(i * test_inplace_transpose.start_inx, test_inplace_transpose.z_I);
+        }
     }
 
     test_inplace_transpose.inplace_transpose_square_GPU(argv, commands, kernel_ST, &NDRangePureExecTimeMs);
@@ -1225,15 +1227,25 @@ int main(int argc, char** argv)
 {
     int status;
 
-    cl_context          context;
-    cl_kernel           kernel_ST;
-    cl_kernel           kernel_swap;
-    cl_command_queue    commands;
+    cl_context          context = NULL;
+    cl_kernel           kernel_ST = NULL;
+    cl_kernel           kernel_swap = NULL;
+    cl_command_queue    commands = NULL;
 
     enum INPUT_OUTPUT_TYPE_T input_output_type;
 
     input_output_type = COMPLEX_TO_COMPLEX;
-
+    if (argc != 7)
+    {
+        std::cout << "The arguments are:\n";
+        std::cout << "1)  data type: C2C/R2R/P2P\n";
+        std::cout << "2) Transpose kernel file name in kernel_files folder\n";
+        std::cout << "3) float/ double\n";
+        std::cout << "4) length of matrix\n";
+        std::cout << "5) breadth of matrix\n";
+        std::cout << "6) Swap kernel file name in kernel_files folder\n";
+        return -1;
+    }
     if (strcmp(argv[1], "R2R") == 0)
     {
         input_output_type = REAL_TO_REAL;
